@@ -93,7 +93,7 @@ class _HttpSecurityPinningService {
 
           _hostCertificates[url.host] = fetchedHostCertificates
               .whereType<Uint8List>()
-              .toList(growable: false);
+              .toList(growable: true);
           break; // Success, exit loop
         } on PlatformException catch (e) {
           attempts++;
@@ -188,7 +188,7 @@ class _HttpSecurityPinningService {
 
   /// Removes a [host] from the certificate cache.
   static Future<void> _removeCertificates(String host) async {
-    _hostCertificates[host]?.clear();
+    _hostCertificates.remove(host);
   }
 
   /// Computes the SHA-256 digest of the Subject Public Key Info (SPKI)
