@@ -59,12 +59,12 @@ class _HttpSecurityPinningService {
   /// A cache of host certificates to avoid re-fetching on every request.
   static const int _maxCacheSize = 50;
   static final Map<String, List<Uint8List>> _hostCertificates =
-      <String, List<Uint8List>>{};
+  <String, List<Uint8List>>{};
 
   /// Pre-decoded SPKI pins cache to avoid repeated base64 decoding.
   /// Uses a stable string key (sorted pin list) to prevent duplicate cache entries.
   static final Map<String, List<List<int>>> _decodedPinsCache =
-      <String, List<List<int>>>{};
+  <String, List<List<int>>>{};
 
 
   /// Fetches the certificate chain for a given [url] from the native platform.
@@ -74,10 +74,10 @@ class _HttpSecurityPinningService {
   ///
   /// Throws a [CertificateFetchException] if all retry attempts fail.
   static Future<List<Uint8List>> _getHostCertificates(
-    Uri url,
-    Duration timeout,
-    int retryCount,
-  ) async {
+      Uri url,
+      Duration timeout,
+      int retryCount,
+      ) async {
     if (_hostCertificates[url.host] == null) {
       int attempts = 0;
       while (attempts <= retryCount) {
@@ -89,8 +89,8 @@ class _HttpSecurityPinningService {
           final List<Object?>? fetchedHostCertificates = await _channel
               .invokeMethod('fetchHostCertificates', arguments)
               .timeout(timeout +
-                  const Duration(
-                      seconds: 1)); // Add a grace period to the Dart timeout
+              const Duration(
+                  seconds: 1)); // Add a grace period to the Dart timeout
 
           if (fetchedHostCertificates == null ||
               fetchedHostCertificates.isEmpty) {
@@ -101,12 +101,12 @@ class _HttpSecurityPinningService {
           final certList = fetchedHostCertificates
               .whereType<Uint8List>()
               .toList(growable: true);
-          
+
           // Enforce cache size limit (FIFO eviction)
           if (_hostCertificates.length >= _maxCacheSize) {
             _hostCertificates.remove(_hostCertificates.keys.first);
           }
-          
+
           _hostCertificates[url.host] = certList;
           break; // Success, exit loop
         } on PlatformException catch (e) {
@@ -142,20 +142,20 @@ class _HttpSecurityPinningService {
   /// Throws a [NoValidPinsFoundException] if no certificates in the chain
   /// match the provided pins.
   static Future<List<Uint8List>> _hostPinCertificates(
-    Uri url,
-    Set<String> validPins,
-    Duration timeout,
-    int retryCount,
-  ) async {
+      Uri url,
+      Set<String> validPins,
+      Duration timeout,
+      int retryCount,
+      ) async {
     final hostCertificates =
-        await _HttpSecurityPinningService._getHostCertificates(
-            url, timeout, retryCount);
+    await _HttpSecurityPinningService._getHostCertificates(
+        url, timeout, retryCount);
 
     // Pre-decode and cache pins to avoid repeated base64 decoding
     // Use a stable string key to prevent duplicate cache entries
     final sortedPins = (validPins.toList()..sort());
     final pinKey = sortedPins.join(',');
-    
+
     if (!_decodedPinsCache.containsKey(pinKey)) {
       try {
         // Pins are already validated in constructor, but re-decode for cache
@@ -174,15 +174,15 @@ class _HttpSecurityPinningService {
     final info = StringBuffer("Certificate chain for $url: ");
     bool isFirst = true;
     final List<Uint8List> hostPinCerts = [];
-    
+
     for (final cert in hostCertificates) {
       try {
         final Uint8List serverSpkiSha256Digest =
-            Uint8List.fromList(_spkiSha256Digest(cert).bytes);
+        Uint8List.fromList(_spkiSha256Digest(cert).bytes);
         if (!isFirst) info.write(", ");
         isFirst = false;
         info.write(base64.encode(serverSpkiSha256Digest));
-        
+
         // Check if certificate matches any pin
         for (final pin in decodedPins) {
           if (_listEquals(pin, serverSpkiSha256Digest)) {
@@ -210,20 +210,20 @@ class _HttpSecurityPinningService {
   /// Creates a [SecurityContext] containing the trusted certificates that match
   /// the pinned hashes for the given [url].
   static Future<SecurityContext> _pinnedSecurityContext(
-    Uri url,
-    Set<String> validPins,
-    Duration timeout,
-    int retryCount,
-  ) async {
+      Uri url,
+      Set<String> validPins,
+      Duration timeout,
+      int retryCount,
+      ) async {
     final List<Uint8List> pinCerts =
-        await _HttpSecurityPinningService._hostPinCertificates(
-            url, validPins, timeout, retryCount);
+    await _HttpSecurityPinningService._hostPinCertificates(
+        url, validPins, timeout, retryCount);
 
     final securityContext = SecurityContext();
     for (final pinCert in pinCerts) {
       final pemCertificate = PemCodec(PemLabel.certificate).encode(pinCert);
       final Uint8List pemCertificatesBytes =
-          const AsciiEncoder().convert(pemCertificate);
+      const AsciiEncoder().convert(pemCertificate);
       securityContext.setTrustedCertificatesBytes(pemCertificatesBytes);
     }
     debugPrint(
@@ -249,35 +249,35 @@ class _HttpSecurityPinningService {
     try {
       final asn1Parser = ASN1Parser(certificate);
       final signedCert = asn1Parser.nextObject();
-      
+
       // Verify Certificate is a SEQUENCE
       if (signedCert is! ASN1Sequence) {
         throw CertificateFetchException(
             'Invalid certificate: root element is not a SEQUENCE');
       }
-      
+
       if (signedCert.elements.isEmpty) {
         throw CertificateFetchException(
             'Invalid certificate: Certificate SEQUENCE is empty');
       }
-      
+
       // Extract TBSCertificate (first element of Certificate)
       final cert = signedCert.elements[0];
       if (cert is! ASN1Sequence) {
         throw CertificateFetchException(
             'Invalid certificate: TBSCertificate is not a SEQUENCE');
       }
-      
+
       if (cert.elements.length < 7) {
         throw CertificateFetchException(
             'Invalid certificate: TBSCertificate has insufficient fields');
       }
-      
+
       // Find SubjectPublicKeyInfo (SEQUENCE) at position 6
       // Note: Position may vary if optional version field [0] is present,
       // but in standard X.509 v3 certs, it's at index 6
       ASN1Object? spkiElement = cert.elements[6];
-      
+
       // If element at index 6 is not a SEQUENCE, it might be BIT STRING
       // (edge case for X.509 v1 certs or non-standard encodings)
       if (spkiElement is! ASN1Sequence) {
@@ -293,17 +293,17 @@ class _HttpSecurityPinningService {
           }
         }
       }
-      
+
       if (spkiElement is! ASN1Sequence) {
         throw CertificateFetchException(
             'Invalid certificate: could not find SubjectPublicKeyInfo SEQUENCE');
       }
-      
+
       // Compute SHA-256 of DER-encoded SPKI
       // encodedBytes includes the SEQUENCE tag and length
       final spkiBytes = spkiElement.encodedBytes;
       final spkiDigest = sha256.convert(spkiBytes);
-      
+
       return spkiDigest;
     } on CertificateFetchException {
       rethrow;
@@ -389,7 +389,8 @@ class HttpSecurityPinningClient implements HttpClient {
 
   bool _isClosed = false;
 
-  Completer<HttpClient>? _instanceCreationCompleter;
+  // Per-host completers to prevent cross-host race conditions
+  final Map<String, Completer<HttpClient>> _hostCompleters = {};
 
   Future<bool> Function(Uri url, String scheme, String? realm)? _authenticate;
   Future<ConnectionTask<Socket>> Function(
@@ -398,14 +399,14 @@ class HttpSecurityPinningClient implements HttpClient {
   final List<_Credential> _credentials = [];
   String Function(Uri url)? _findProxy;
   Future<bool> Function(String host, int port, String scheme, String? realm)?
-      _authenticateProxy;
+  _authenticateProxy;
   final List<_ProxyCredential> _proxyCredentials = [];
   bool Function(X509Certificate cert, String host, int port)?
-      _badCertificateCallback;
+  _badCertificateCallback;
 
   bool _pinningFailureCallback(X509Certificate cert, String host, int port) {
     final badCertificateCallback = _badCertificateCallback;
-    
+
     // If user provided a custom callback, use its decision
     if (badCertificateCallback != null) {
       final shouldTrust = badCertificateCallback(cert, host, port);
@@ -450,7 +451,7 @@ class HttpSecurityPinningClient implements HttpClient {
     final securityContext = _validPins.isEmpty
         ? SecurityContext.defaultContext
         : await _HttpSecurityPinningService._pinnedSecurityContext(
-            url, _validPins, timeout, retryCount);
+        url, _validPins, timeout, retryCount);
 
     final newHttpClient = HttpClient(context: securityContext);
     _copyHttpClientState(_delegatePinnedHttpClient, newHttpClient);
@@ -465,38 +466,40 @@ class HttpSecurityPinningClient implements HttpClient {
           'HttpSecurityPinningClient has been closed and cannot be used');
     }
 
-    // Check if we're already connected to this host
-    // This must come FIRST before checking completer to handle host switches
-    if (_connectedHost == url.host && _instanceCreationCompleter == null) {
+    final requestHost = url.host;
+
+    // Fast path: already connected to this host and no creation in flight
+    if (_connectedHost == requestHost && !_hostCompleters.containsKey(requestHost)) {
       return _delegatePinnedHttpClient;
     }
 
-    // Use PER-INSTANCE completer, not global (avoids cross-instance sharing)
-    // Only reuse delegate if we're waiting for creation of the SAME host
-    if (_instanceCreationCompleter != null && _connectedHost == url.host) {
-      // Same instance, same host, concurrent request - wait for our own creation
+    // Concurrent request for same host - wait for existing creation
+    if (_hostCompleters.containsKey(requestHost)) {
       try {
-        final stableDelegate = await _instanceCreationCompleter!.future;
-        return stableDelegate;
+        return await _hostCompleters[requestHost]!.future;
       } catch (_) {
-        _instanceCreationCompleter = null;
+        // Creation failed, clean up and let caller retry
+        _hostCompleters.remove(requestHost);
         rethrow;
       }
     }
 
-    // New host or host switch needed - create new completer and delegate
-    _instanceCreationCompleter = Completer<HttpClient>();
+    // New host - create with per-host coordination
+    final completer = Completer<HttpClient>();
+    _hostCompleters[requestHost] = completer;
+
     try {
       final newHttpClient = await _createPinnedHttpClient(url);
       final oldClient = _delegatePinnedHttpClient;
+      _connectedHost = requestHost;
       _delegatePinnedHttpClient = newHttpClient;
       oldClient.close();
-      _instanceCreationCompleter!.complete(newHttpClient);
-      _instanceCreationCompleter = null;  // Clear after success
+      completer.complete(newHttpClient);
+      _hostCompleters.remove(requestHost);
       return newHttpClient;
     } catch (e, stackTrace) {
-      _instanceCreationCompleter!.completeError(e, stackTrace);
-      _instanceCreationCompleter = null;
+      completer.completeError(e, stackTrace);
+      _hostCompleters.remove(requestHost);
       rethrow;
     }
   }
@@ -514,10 +517,10 @@ class HttpSecurityPinningClient implements HttpClient {
   ///
   /// Throws [ArgumentError] if any SPKI hash is invalid (invalid base64 or wrong length).
   HttpSecurityPinningClient(
-    List<String> spkiHashes, {
-    this.timeout = const Duration(seconds: 10),
-    this.retryCount = 3,
-  })  : _validPins = _validatePins(spkiHashes),
+      List<String> spkiHashes, {
+        this.timeout = const Duration(seconds: 10),
+        this.retryCount = 3,
+      })  : _validPins = _validatePins(spkiHashes),
         super() {
     debugPrint(
         "$_tag: HttpSecurityPinningClient initialized with ${_validPins.length} pins");
@@ -536,13 +539,13 @@ class HttpSecurityPinningClient implements HttpClient {
       try {
         // Decode and validate length
         final decodedPin = base64.decode(pin);
-        
+
         // SHA-256 must be exactly 32 bytes
         if (decodedPin.length != 32) {
           throw ArgumentError(
               'SPKI hash "$pin" is ${decodedPin.length} bytes, expected 32 (SHA-256)');
         }
-        
+
         validatedPins.add(pin);
       } on FormatException catch (e) {
         throw ArgumentError('Invalid base64 in SPKI hash "$pin": $e');
@@ -659,8 +662,8 @@ class HttpSecurityPinningClient implements HttpClient {
   @override
   set connectionFactory(
       Future<ConnectionTask<Socket>> Function(
-              Uri url, String? proxyHost, int? proxyPort)?
-          f) {
+          Uri url, String? proxyHost, int? proxyPort)?
+      f) {
     _connectionFactory = f;
     _delegatePinnedHttpClient.connectionFactory = f;
   }
@@ -687,8 +690,8 @@ class HttpSecurityPinningClient implements HttpClient {
   @override
   set authenticateProxy(
       Future<bool> Function(
-              String host, int port, String scheme, String? realm)?
-          f) {
+          String host, int port, String scheme, String? realm)?
+      f) {
     _authenticateProxy = f;
     _delegatePinnedHttpClient.authenticateProxy = f;
   }
