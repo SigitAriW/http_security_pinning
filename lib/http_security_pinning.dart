@@ -66,10 +66,22 @@ class _HttpSecurityPinningService {
   static final Map<String, List<List<int>>> _decodedPinsCache =
       <String, List<List<int>>>{};
 
-  /// Maps host to their client creation completers to prevent duplicate creation
-  /// and ensure thread-safe future resolution
+  /// Maps (host + pin set) to their client creation completers to prevent duplicate creation
+  /// and ensure thread-safe future resolution.
+  /// 
+  /// Key format: "host:pin1,pin2,..." to scope coordination per unique (host, pins) pair.
+  /// This prevents race conditions when concurrent requests to the same host use different pin sets.
   static final Map<String, Completer<HttpClient>> _clientCreationCompleters =
       <String, Completer<HttpClient>>{};
+
+  /// Creates a stable completion key from host and pins to scope client creation coordination.
+  /// 
+  /// Ensures that two HttpSecurityPinningClient instances for the same host but different
+  /// pin sets don't interfere with each other's delegate creation.
+  static String _makeCompletionKey(String host, Set<String> pins) {
+    final sortedPins = pins.toList()..sort();
+    return '$host:${sortedPins.join(',')}';
+  }
 
   /// Fetches the certificate chain for a given [url] from the native platform.
   ///
@@ -467,16 +479,17 @@ class HttpSecurityPinningClient implements HttpClient {
       return _delegatePinnedHttpClient;
     }
 
-    // Atomically check/create completer for this host
+    // Atomically check/create completer for this (host, pins) pair
+    final completionKey = _HttpSecurityPinningService._makeCompletionKey(url.host, _validPins);
     Completer<HttpClient>? completer = 
-        _HttpSecurityPinningService._clientCreationCompleters[url.host];
+        _HttpSecurityPinningService._clientCreationCompleters[completionKey];
     
     final shouldCreateClient = completer == null && _connectedHost != url.host;
     
     if (shouldCreateClient) {
       // Create and store completer atomically
       completer = Completer<HttpClient>();
-      _HttpSecurityPinningService._clientCreationCompleters[url.host] = completer;
+      _HttpSecurityPinningService._clientCreationCompleters[completionKey] = completer;
       
       try {
         final newHttpClient = await _createPinnedHttpClient(url);
@@ -488,7 +501,7 @@ class HttpSecurityPinningClient implements HttpClient {
         rethrow;
       } finally {
         // Clean up the completer after creation
-        _HttpSecurityPinningService._clientCreationCompleters.remove(url.host);
+        _HttpSecurityPinningService._clientCreationCompleters.remove(completionKey);
       }
     } else if (completer != null) {
       // Wait for ongoing creation to complete
@@ -497,7 +510,7 @@ class HttpSecurityPinningClient implements HttpClient {
         _delegatePinnedHttpClient = client;
       } catch (_) {
         // If creation failed, clear the completer so next request retries
-        _HttpSecurityPinningService._clientCreationCompleters.remove(url.host);
+        _HttpSecurityPinningService._clientCreationCompleters.remove(completionKey);
         rethrow;
       }
     }
