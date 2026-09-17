@@ -66,22 +66,6 @@ class _HttpSecurityPinningService {
   static final Map<String, List<List<int>>> _decodedPinsCache =
       <String, List<List<int>>>{};
 
-  /// Maps (host + pin set) to their client creation completers to prevent duplicate creation
-  /// and ensure thread-safe future resolution.
-  /// 
-  /// Key format: "host:pin1,pin2,..." to scope coordination per unique (host, pins) pair.
-  /// This prevents race conditions when concurrent requests to the same host use different pin sets.
-  static final Map<String, Completer<HttpClient>> _clientCreationCompleters =
-      <String, Completer<HttpClient>>{};
-
-  /// Creates a stable completion key from host and pins to scope client creation coordination.
-  /// 
-  /// Ensures that two HttpSecurityPinningClient instances for the same host but different
-  /// pin sets don't interfere with each other's delegate creation.
-  static String _makeCompletionKey(String host, Set<String> pins) {
-    final sortedPins = pins.toList()..sort();
-    return '$host:${sortedPins.join(',')}';
-  }
 
   /// Fetches the certificate chain for a given [url] from the native platform.
   ///
@@ -386,7 +370,6 @@ class HttpSecurityPinningClient implements HttpClient {
   static void clearCache() {
     _HttpSecurityPinningService._hostCertificates.clear();
     _HttpSecurityPinningService._decodedPinsCache.clear();
-    _HttpSecurityPinningService._clientCreationCompleters.clear();
   }
 
   static const String _tag = "HttpSecurityPinningClient";
@@ -474,51 +457,45 @@ class HttpSecurityPinningClient implements HttpClient {
     return newHttpClient;
   }
 
+  Completer<HttpClient>? _instanceCreationCompleter;
+
   Future<HttpClient> _getOrCreatePinnedHttpClient(Uri url) async {
     if (_isClosed) {
       throw StateError(
           'HttpSecurityPinningClient has been closed and cannot be used');
     }
 
-    // Atomically check/create completer for this (host, pins) pair
-    final completionKey = _HttpSecurityPinningService._makeCompletionKey(url.host, _validPins);
-    Completer<HttpClient>? completer = 
-        _HttpSecurityPinningService._clientCreationCompleters[completionKey];
-    
-    final shouldCreateClient = completer == null && _connectedHost != url.host;
-    
-    if (shouldCreateClient) {
-      // Create and store completer atomically
-      completer = Completer<HttpClient>();
-      _HttpSecurityPinningService._clientCreationCompleters[completionKey] = completer;
-      
+    // Use PER-INSTANCE completer, not global (avoids cross-instance sharing)
+    if (_instanceCreationCompleter != null) {
+      // Same instance, concurrent request - wait for our own creation
       try {
-        final newHttpClient = await _createPinnedHttpClient(url);
-        final oldClient = _delegatePinnedHttpClient;
-        _delegatePinnedHttpClient = newHttpClient;
-        oldClient.close();
-        completer.complete(newHttpClient);
-      } catch (e, stackTrace) {
-        completer.completeError(e, stackTrace);
-        rethrow;
-      } finally {
-        // Clean up the completer after creation
-        _HttpSecurityPinningService._clientCreationCompleters.remove(completionKey);
-      }
-    } else if (completer != null) {
-      // Wait for ongoing creation to complete, then reuse the created delegate
-      try {
-        await completer.future;
-        // Creator already set _delegatePinnedHttpClient, just reuse it
-        // Don't create a new one - that causes memory leaks and races
+        final stableDelegate = await _instanceCreationCompleter!.future;
+        return stableDelegate;
       } catch (_) {
-        // If creation failed, clear the completer so next request retries
-        _HttpSecurityPinningService._clientCreationCompleters.remove(completionKey);
+        _instanceCreationCompleter = null;
         rethrow;
       }
     }
-    
-    return _delegatePinnedHttpClient;
+
+    // Check if we need to create (new host)
+    if (_connectedHost == url.host) {
+      return _delegatePinnedHttpClient;
+    }
+
+    // Create for this instance only
+    _instanceCreationCompleter = Completer<HttpClient>();
+    try {
+      final newHttpClient = await _createPinnedHttpClient(url);
+      final oldClient = _delegatePinnedHttpClient;
+      _delegatePinnedHttpClient = newHttpClient;
+      oldClient.close();
+      _instanceCreationCompleter!.complete(newHttpClient);
+      return newHttpClient;
+    } catch (e, stackTrace) {
+      _instanceCreationCompleter!.completeError(e, stackTrace);
+      _instanceCreationCompleter = null;
+      rethrow;
+    }
   }
 
   /// Creates a new [HttpClient] that enforces certificate pinning.
