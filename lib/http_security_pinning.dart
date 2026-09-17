@@ -506,10 +506,12 @@ class HttpSecurityPinningClient implements HttpClient {
         _HttpSecurityPinningService._clientCreationCompleters.remove(completionKey);
       }
     } else if (completer != null) {
-      // Wait for ongoing creation to complete
+      // Wait for ongoing creation to complete, but create OWN delegate
       try {
-        final client = await completer.future;
-        _delegatePinnedHttpClient = client;
+        await completer.future;  // Just wait for success signal
+        // Don't use creator's delegate! Create our own for this host
+        final newHttpClient = await _createPinnedHttpClient(url);
+        _delegatePinnedHttpClient = newHttpClient;
       } catch (_) {
         // If creation failed, clear the completer so next request retries
         _HttpSecurityPinningService._clientCreationCompleters.remove(completionKey);
