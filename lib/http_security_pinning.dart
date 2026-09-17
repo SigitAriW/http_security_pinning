@@ -108,6 +108,11 @@ class _HttpSecurityPinningService {
               .whereType<Uint8List>()
               .toList(growable: true);
 
+          if (certList.isEmpty) {
+            throw CertificateFetchException(
+                'Native method returned non-Uint8List certificates.');
+          }
+
           // Enforce cache size limit (FIFO eviction)
           if (_hostCertificates.length >= _maxCacheSize) {
             _hostCertificates.remove(_hostCertificates.keys.first);
