@@ -46,6 +46,13 @@ class NoValidPinsFoundException extends CertificatePinningException {
       : super('No valid SPKI pins found for host: $host');
 }
 
+typedef _PinnedSecurityContextFactory = Future<SecurityContext> Function(
+    Uri url, Set<String> validPins, Duration timeout, int retryCount);
+typedef _HttpClientFactory = HttpClient Function({SecurityContext? context});
+
+HttpClient _defaultHttpClientFactory({SecurityContext? context}) =>
+    HttpClient(context: context);
+
 // --- Internal Service Class ---
 
 /// A private service class that handles the core logic of certificate pinning.
@@ -59,13 +66,12 @@ class _HttpSecurityPinningService {
   /// A cache of host certificates to avoid re-fetching on every request.
   static const int _maxCacheSize = 50;
   static final Map<String, List<Uint8List>> _hostCertificates =
-  <String, List<Uint8List>>{};
+      <String, List<Uint8List>>{};
 
   /// Pre-decoded SPKI pins cache to avoid repeated base64 decoding.
   /// Uses a stable string key (sorted pin list) to prevent duplicate cache entries.
   static final Map<String, List<List<int>>> _decodedPinsCache =
-  <String, List<List<int>>>{};
-
+      <String, List<List<int>>>{};
 
   /// Fetches the certificate chain for a given [url] from the native platform.
   ///
@@ -74,10 +80,10 @@ class _HttpSecurityPinningService {
   ///
   /// Throws a [CertificateFetchException] if all retry attempts fail.
   static Future<List<Uint8List>> _getHostCertificates(
-      Uri url,
-      Duration timeout,
-      int retryCount,
-      ) async {
+    Uri url,
+    Duration timeout,
+    int retryCount,
+  ) async {
     if (_hostCertificates[url.host] == null) {
       int attempts = 0;
       while (attempts <= retryCount) {
@@ -89,8 +95,8 @@ class _HttpSecurityPinningService {
           final List<Object?>? fetchedHostCertificates = await _channel
               .invokeMethod('fetchHostCertificates', arguments)
               .timeout(timeout +
-              const Duration(
-                  seconds: 1)); // Add a grace period to the Dart timeout
+                  const Duration(
+                      seconds: 1)); // Add a grace period to the Dart timeout
 
           if (fetchedHostCertificates == null ||
               fetchedHostCertificates.isEmpty) {
@@ -142,14 +148,14 @@ class _HttpSecurityPinningService {
   /// Throws a [NoValidPinsFoundException] if no certificates in the chain
   /// match the provided pins.
   static Future<List<Uint8List>> _hostPinCertificates(
-      Uri url,
-      Set<String> validPins,
-      Duration timeout,
-      int retryCount,
-      ) async {
+    Uri url,
+    Set<String> validPins,
+    Duration timeout,
+    int retryCount,
+  ) async {
     final hostCertificates =
-    await _HttpSecurityPinningService._getHostCertificates(
-        url, timeout, retryCount);
+        await _HttpSecurityPinningService._getHostCertificates(
+            url, timeout, retryCount);
 
     // Pre-decode and cache pins to avoid repeated base64 decoding
     // Use a stable string key to prevent duplicate cache entries
@@ -178,7 +184,7 @@ class _HttpSecurityPinningService {
     for (final cert in hostCertificates) {
       try {
         final Uint8List serverSpkiSha256Digest =
-        Uint8List.fromList(_spkiSha256Digest(cert).bytes);
+            Uint8List.fromList(_spkiSha256Digest(cert).bytes);
         if (!isFirst) info.write(", ");
         isFirst = false;
         info.write(base64.encode(serverSpkiSha256Digest));
@@ -210,20 +216,20 @@ class _HttpSecurityPinningService {
   /// Creates a [SecurityContext] containing the trusted certificates that match
   /// the pinned hashes for the given [url].
   static Future<SecurityContext> _pinnedSecurityContext(
-      Uri url,
-      Set<String> validPins,
-      Duration timeout,
-      int retryCount,
-      ) async {
+    Uri url,
+    Set<String> validPins,
+    Duration timeout,
+    int retryCount,
+  ) async {
     final List<Uint8List> pinCerts =
-    await _HttpSecurityPinningService._hostPinCertificates(
-        url, validPins, timeout, retryCount);
+        await _HttpSecurityPinningService._hostPinCertificates(
+            url, validPins, timeout, retryCount);
 
     final securityContext = SecurityContext();
     for (final pinCert in pinCerts) {
       final pemCertificate = PemCodec(PemLabel.certificate).encode(pinCert);
       final Uint8List pemCertificatesBytes =
-      const AsciiEncoder().convert(pemCertificate);
+          const AsciiEncoder().convert(pemCertificate);
       securityContext.setTrustedCertificatesBytes(pemCertificatesBytes);
     }
     debugPrint(
@@ -383,13 +389,15 @@ class HttpSecurityPinningClient implements HttpClient {
   /// The number of times to retry fetching the certificate chain upon failure.
   final int retryCount;
 
-  HttpClient _delegatePinnedHttpClient = HttpClient();
-
-  String? _connectedHost;
+  final _PinnedSecurityContextFactory _pinnedSecurityContextFactory;
+  final _HttpClientFactory _httpClientFactory;
+  final HttpClient _stateHttpClient = HttpClient();
+  final Map<String, HttpClient> _delegatePinnedHttpClients = {};
 
   bool _isClosed = false;
+  bool _closeForce = false;
 
-  // Per-host completers to prevent cross-host race conditions
+  // Per-host completers coordinate creation for the same requested host.
   final Map<String, Completer<HttpClient>> _hostCompleters = {};
 
   Future<bool> Function(Uri url, String scheme, String? realm)? _authenticate;
@@ -399,10 +407,10 @@ class HttpSecurityPinningClient implements HttpClient {
   final List<_Credential> _credentials = [];
   String Function(Uri url)? _findProxy;
   Future<bool> Function(String host, int port, String scheme, String? realm)?
-  _authenticateProxy;
+      _authenticateProxy;
   final List<_ProxyCredential> _proxyCredentials = [];
   bool Function(X509Certificate cert, String host, int port)?
-  _badCertificateCallback;
+      _badCertificateCallback;
 
   bool _pinningFailureCallback(X509Certificate cert, String host, int port) {
     final badCertificateCallback = _badCertificateCallback;
@@ -417,46 +425,46 @@ class HttpSecurityPinningClient implements HttpClient {
 
     debugPrint(
         "$_tag: Pinning failure callback for $host. Invalidating cache.");
-    _HttpSecurityPinningService._removeCertificates(host);
-    _connectedHost = null;
+    final normalizedHost = host.toLowerCase();
+    _HttpSecurityPinningService._removeCertificates(normalizedHost);
+    _delegatePinnedHttpClients.remove(normalizedHost)?.close(force: true);
     return false;
   }
 
-  void _copyHttpClientState(HttpClient from, HttpClient to) {
-    to.idleTimeout = from.idleTimeout;
-    to.userAgent = from.userAgent;
-    to.connectionTimeout = from.connectionTimeout;
-    to.maxConnectionsPerHost = from.maxConnectionsPerHost;
-    to.autoUncompress = from.autoUncompress;
+  void _applyHttpClientState(HttpClient client) {
+    client.idleTimeout = _stateHttpClient.idleTimeout;
+    client.userAgent = _stateHttpClient.userAgent;
+    client.connectionTimeout = _stateHttpClient.connectionTimeout;
+    client.maxConnectionsPerHost = _stateHttpClient.maxConnectionsPerHost;
+    client.autoUncompress = _stateHttpClient.autoUncompress;
 
-    to.authenticate = _authenticate;
-    to.connectionFactory = _connectionFactory;
-    to.keyLog = _keyLog;
-    to.findProxy = _findProxy;
-    to.authenticateProxy = _authenticateProxy;
+    client.authenticate = _authenticate;
+    client.connectionFactory = _connectionFactory;
+    client.keyLog = _keyLog;
+    client.findProxy = _findProxy;
+    client.authenticateProxy = _authenticateProxy;
 
     for (final credential in _credentials) {
-      to.addCredentials(
+      client.addCredentials(
           credential.url, credential.realm, credential.credentials);
     }
     for (final proxyCredential in _proxyCredentials) {
-      to.addProxyCredentials(proxyCredential.host, proxyCredential.port,
+      client.addProxyCredentials(proxyCredential.host, proxyCredential.port,
           proxyCredential.realm, proxyCredential.credentials);
     }
 
-    to.badCertificateCallback = _pinningFailureCallback;
+    client.badCertificateCallback = _pinningFailureCallback;
   }
 
   Future<HttpClient> _createPinnedHttpClient(Uri url) async {
     final securityContext = _validPins.isEmpty
         ? SecurityContext.defaultContext
-        : await _HttpSecurityPinningService._pinnedSecurityContext(
-        url, _validPins, timeout, retryCount);
+        : await _pinnedSecurityContextFactory(
+            url, _validPins, timeout, retryCount);
 
-    final newHttpClient = HttpClient(context: securityContext);
-    _copyHttpClientState(_delegatePinnedHttpClient, newHttpClient);
+    final newHttpClient = _httpClientFactory(context: securityContext);
+    _applyHttpClientState(newHttpClient);
 
-    _connectedHost = url.host;
     return newHttpClient;
   }
 
@@ -466,41 +474,54 @@ class HttpSecurityPinningClient implements HttpClient {
           'HttpSecurityPinningClient has been closed and cannot be used');
     }
 
-    final requestHost = url.host;
-
-    // Fast path: already connected to this host and no creation in flight
-    if (_connectedHost == requestHost && !_hostCompleters.containsKey(requestHost)) {
-      return _delegatePinnedHttpClient;
+    final requestHost = url.host.toLowerCase();
+    final existingClient = _delegatePinnedHttpClients[requestHost];
+    if (existingClient != null) {
+      return existingClient;
     }
 
-    // Concurrent request for same host - wait for existing creation
-    if (_hostCompleters.containsKey(requestHost)) {
-      try {
-        return await _hostCompleters[requestHost]!.future;
-      } catch (_) {
-        // Creation failed, clean up and let caller retry
-        _hostCompleters.remove(requestHost);
-        rethrow;
-      }
+    final existingCompleter = _hostCompleters[requestHost];
+    if (existingCompleter != null) {
+      return existingCompleter.future;
     }
 
-    // New host - create with per-host coordination
     final completer = Completer<HttpClient>();
+    unawaited(
+      completer.future
+          .then<void>((_) {}, onError: (Object _, StackTrace __) {}),
+    );
     _hostCompleters[requestHost] = completer;
 
     try {
       final newHttpClient = await _createPinnedHttpClient(url);
-      final oldClient = _delegatePinnedHttpClient;
-      _connectedHost = requestHost;
-      _delegatePinnedHttpClient = newHttpClient;
-      oldClient.close();
+
+      if (_isClosed) {
+        newHttpClient.close(force: _closeForce);
+        throw StateError(
+            'HttpSecurityPinningClient has been closed and cannot be used');
+      }
+
+      final cachedClient = _delegatePinnedHttpClients[requestHost];
+      if (cachedClient != null) {
+        newHttpClient.close();
+        if (!completer.isCompleted) {
+          completer.complete(cachedClient);
+        }
+        return cachedClient;
+      }
+
+      _delegatePinnedHttpClients[requestHost] = newHttpClient;
       completer.complete(newHttpClient);
-      _hostCompleters.remove(requestHost);
       return newHttpClient;
     } catch (e, stackTrace) {
-      completer.completeError(e, stackTrace);
-      _hostCompleters.remove(requestHost);
+      if (!completer.isCompleted) {
+        completer.completeError(e, stackTrace);
+      }
       rethrow;
+    } finally {
+      if (identical(_hostCompleters[requestHost], completer)) {
+        _hostCompleters.remove(requestHost);
+      }
     }
   }
 
@@ -517,10 +538,30 @@ class HttpSecurityPinningClient implements HttpClient {
   ///
   /// Throws [ArgumentError] if any SPKI hash is invalid (invalid base64 or wrong length).
   HttpSecurityPinningClient(
-      List<String> spkiHashes, {
-        this.timeout = const Duration(seconds: 10),
-        this.retryCount = 3,
-      })  : _validPins = _validatePins(spkiHashes),
+    List<String> spkiHashes, {
+    this.timeout = const Duration(seconds: 10),
+    this.retryCount = 3,
+  })  : _validPins = _validatePins(spkiHashes),
+        _pinnedSecurityContextFactory =
+            _HttpSecurityPinningService._pinnedSecurityContext,
+        _httpClientFactory = _defaultHttpClientFactory,
+        super() {
+    debugPrint(
+        "$_tag: HttpSecurityPinningClient initialized with ${_validPins.length} pins");
+  }
+
+  @visibleForTesting
+  HttpSecurityPinningClient.testable(
+    List<String> spkiHashes, {
+    this.timeout = const Duration(seconds: 10),
+    this.retryCount = 3,
+    required Future<SecurityContext> Function(
+            Uri url, Set<String> validPins, Duration timeout, int retryCount)
+        pinnedSecurityContextFactory,
+    required HttpClient Function({SecurityContext? context}) httpClientFactory,
+  })  : _validPins = _validatePins(spkiHashes),
+        _pinnedSecurityContextFactory = pinnedSecurityContextFactory,
+        _httpClientFactory = httpClientFactory,
         super() {
     debugPrint(
         "$_tag: HttpSecurityPinningClient initialized with ${_validPins.length} pins");
@@ -616,104 +657,151 @@ class HttpSecurityPinningClient implements HttpClient {
   Future<HttpClientRequest> patchUrl(Uri url) => openUrl('PATCH', url);
 
   @override
-  set idleTimeout(Duration timeout) =>
-      _delegatePinnedHttpClient.idleTimeout = timeout;
+  set idleTimeout(Duration timeout) {
+    _stateHttpClient.idleTimeout = timeout;
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.idleTimeout = timeout;
+    }
+  }
 
   @override
-  Duration get idleTimeout => _delegatePinnedHttpClient.idleTimeout;
+  Duration get idleTimeout => _stateHttpClient.idleTimeout;
 
   @override
-  set connectionTimeout(Duration? timeout) =>
-      _delegatePinnedHttpClient.connectionTimeout = timeout;
+  set connectionTimeout(Duration? timeout) {
+    _stateHttpClient.connectionTimeout = timeout;
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.connectionTimeout = timeout;
+    }
+  }
 
   @override
-  Duration? get connectionTimeout =>
-      _delegatePinnedHttpClient.connectionTimeout;
+  Duration? get connectionTimeout => _stateHttpClient.connectionTimeout;
 
   @override
-  set maxConnectionsPerHost(int? maxConnections) =>
-      _delegatePinnedHttpClient.maxConnectionsPerHost = maxConnections;
+  set maxConnectionsPerHost(int? maxConnections) {
+    _stateHttpClient.maxConnectionsPerHost = maxConnections;
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.maxConnectionsPerHost = maxConnections;
+    }
+  }
 
   @override
-  int? get maxConnectionsPerHost =>
-      _delegatePinnedHttpClient.maxConnectionsPerHost;
+  int? get maxConnectionsPerHost => _stateHttpClient.maxConnectionsPerHost;
 
   @override
-  set autoUncompress(bool autoUncompress) =>
-      _delegatePinnedHttpClient.autoUncompress = autoUncompress;
+  set autoUncompress(bool autoUncompress) {
+    _stateHttpClient.autoUncompress = autoUncompress;
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.autoUncompress = autoUncompress;
+    }
+  }
 
   @override
-  bool get autoUncompress => _delegatePinnedHttpClient.autoUncompress;
+  bool get autoUncompress => _stateHttpClient.autoUncompress;
 
   @override
-  set userAgent(String? userAgent) =>
-      _delegatePinnedHttpClient.userAgent = userAgent;
+  set userAgent(String? userAgent) {
+    _stateHttpClient.userAgent = userAgent;
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.userAgent = userAgent;
+    }
+  }
 
   @override
-  String? get userAgent => _delegatePinnedHttpClient.userAgent;
+  String? get userAgent => _stateHttpClient.userAgent;
 
   @override
   set authenticate(
       Future<bool> Function(Uri url, String scheme, String? realm)? f) {
     _authenticate = f;
-    _delegatePinnedHttpClient.authenticate = f;
+    _stateHttpClient.authenticate = f;
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.authenticate = f;
+    }
   }
 
   @override
   set connectionFactory(
       Future<ConnectionTask<Socket>> Function(
-          Uri url, String? proxyHost, int? proxyPort)?
-      f) {
+              Uri url, String? proxyHost, int? proxyPort)?
+          f) {
     _connectionFactory = f;
-    _delegatePinnedHttpClient.connectionFactory = f;
+    _stateHttpClient.connectionFactory = f;
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.connectionFactory = f;
+    }
   }
 
   @override
   set keyLog(void Function(String line)? f) {
     _keyLog = f;
-    _delegatePinnedHttpClient.keyLog = f;
+    _stateHttpClient.keyLog = f;
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.keyLog = f;
+    }
   }
 
   @override
   void addCredentials(
       Uri url, String realm, HttpClientCredentials credentials) {
     _credentials.add(_Credential(url, realm, credentials));
-    _delegatePinnedHttpClient.addCredentials(url, realm, credentials);
+    _stateHttpClient.addCredentials(url, realm, credentials);
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.addCredentials(url, realm, credentials);
+    }
   }
 
   @override
   set findProxy(String Function(Uri url)? f) {
     _findProxy = f;
-    _delegatePinnedHttpClient.findProxy = f;
+    _stateHttpClient.findProxy = f;
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.findProxy = f;
+    }
   }
 
   @override
   set authenticateProxy(
       Future<bool> Function(
-          String host, int port, String scheme, String? realm)?
-      f) {
+              String host, int port, String scheme, String? realm)?
+          f) {
     _authenticateProxy = f;
-    _delegatePinnedHttpClient.authenticateProxy = f;
+    _stateHttpClient.authenticateProxy = f;
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.authenticateProxy = f;
+    }
   }
 
   @override
   void addProxyCredentials(
       String host, int port, String realm, HttpClientCredentials credentials) {
     _proxyCredentials.add(_ProxyCredential(host, port, realm, credentials));
-    _delegatePinnedHttpClient.addProxyCredentials(
-        host, port, realm, credentials);
+    _stateHttpClient.addProxyCredentials(host, port, realm, credentials);
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.addProxyCredentials(host, port, realm, credentials);
+    }
   }
 
   @override
   set badCertificateCallback(
       bool Function(X509Certificate cert, String host, int port)? callback) {
     _badCertificateCallback = callback;
-    _delegatePinnedHttpClient.badCertificateCallback = _pinningFailureCallback;
+    _stateHttpClient.badCertificateCallback = _pinningFailureCallback;
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.badCertificateCallback = _pinningFailureCallback;
+    }
   }
 
   @override
   void close({bool force = false}) {
-    _delegatePinnedHttpClient.close(force: force);
     _isClosed = true;
+    _closeForce = _closeForce || force;
+
+    for (final client in _delegatePinnedHttpClients.values) {
+      client.close(force: force);
+    }
+    _delegatePinnedHttpClients.clear();
+    _stateHttpClient.close(force: force);
   }
 }
