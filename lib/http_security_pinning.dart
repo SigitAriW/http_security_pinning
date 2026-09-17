@@ -389,6 +389,8 @@ class HttpSecurityPinningClient implements HttpClient {
 
   bool _isClosed = false;
 
+  Completer<HttpClient>? _instanceCreationCompleter;
+
   Future<bool> Function(Uri url, String scheme, String? realm)? _authenticate;
   Future<ConnectionTask<Socket>> Function(
       Uri url, String? proxyHost, int? proxyPort)? _connectionFactory;
@@ -457,17 +459,22 @@ class HttpSecurityPinningClient implements HttpClient {
     return newHttpClient;
   }
 
-  Completer<HttpClient>? _instanceCreationCompleter;
-
   Future<HttpClient> _getOrCreatePinnedHttpClient(Uri url) async {
     if (_isClosed) {
       throw StateError(
           'HttpSecurityPinningClient has been closed and cannot be used');
     }
 
+    // Check if we're already connected to this host
+    // This must come FIRST before checking completer to handle host switches
+    if (_connectedHost == url.host && _instanceCreationCompleter == null) {
+      return _delegatePinnedHttpClient;
+    }
+
     // Use PER-INSTANCE completer, not global (avoids cross-instance sharing)
-    if (_instanceCreationCompleter != null) {
-      // Same instance, concurrent request - wait for our own creation
+    // Only reuse delegate if we're waiting for creation of the SAME host
+    if (_instanceCreationCompleter != null && _connectedHost == url.host) {
+      // Same instance, same host, concurrent request - wait for our own creation
       try {
         final stableDelegate = await _instanceCreationCompleter!.future;
         return stableDelegate;
@@ -477,12 +484,7 @@ class HttpSecurityPinningClient implements HttpClient {
       }
     }
 
-    // Check if we need to create (new host)
-    if (_connectedHost == url.host) {
-      return _delegatePinnedHttpClient;
-    }
-
-    // Create for this instance only
+    // New host or host switch needed - create new completer and delegate
     _instanceCreationCompleter = Completer<HttpClient>();
     try {
       final newHttpClient = await _createPinnedHttpClient(url);
@@ -490,6 +492,7 @@ class HttpSecurityPinningClient implements HttpClient {
       _delegatePinnedHttpClient = newHttpClient;
       oldClient.close();
       _instanceCreationCompleter!.complete(newHttpClient);
+      _instanceCreationCompleter = null;  // Clear after success
       return newHttpClient;
     } catch (e, stackTrace) {
       _instanceCreationCompleter!.completeError(e, stackTrace);
