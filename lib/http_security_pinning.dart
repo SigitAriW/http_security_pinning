@@ -476,7 +476,8 @@ class HttpSecurityPinningClient implements HttpClient {
 
   Future<HttpClient> _getOrCreatePinnedHttpClient(Uri url) async {
     if (_isClosed) {
-      return _delegatePinnedHttpClient;
+      throw StateError(
+          'HttpSecurityPinningClient has been closed and cannot be used');
     }
 
     // Atomically check/create completer for this (host, pins) pair
@@ -493,8 +494,9 @@ class HttpSecurityPinningClient implements HttpClient {
       
       try {
         final newHttpClient = await _createPinnedHttpClient(url);
-        _delegatePinnedHttpClient.close();
+        final oldClient = _delegatePinnedHttpClient;
         _delegatePinnedHttpClient = newHttpClient;
+        oldClient.close();
         completer.complete(newHttpClient);
       } catch (e, stackTrace) {
         completer.completeError(e, stackTrace);
@@ -589,45 +591,45 @@ class HttpSecurityPinningClient implements HttpClient {
 
   @override
   Future<HttpClientRequest> get(String host, int port, String path) =>
-      open("get", host, port, path);
+      open('GET', host, port, path);
 
   @override
-  Future<HttpClientRequest> getUrl(Uri url) => openUrl("get", url);
+  Future<HttpClientRequest> getUrl(Uri url) => openUrl('GET', url);
 
   @override
   Future<HttpClientRequest> post(String host, int port, String path) =>
-      open("post", host, port, path);
+      open('POST', host, port, path);
 
   @override
-  Future<HttpClientRequest> postUrl(Uri url) => openUrl("post", url);
+  Future<HttpClientRequest> postUrl(Uri url) => openUrl('POST', url);
 
   @override
   Future<HttpClientRequest> put(String host, int port, String path) =>
-      open("put", host, port, path);
+      open('PUT', host, port, path);
 
   @override
-  Future<HttpClientRequest> putUrl(Uri url) => openUrl("put", url);
+  Future<HttpClientRequest> putUrl(Uri url) => openUrl('PUT', url);
 
   @override
   Future<HttpClientRequest> delete(String host, int port, String path) =>
-      open("delete", host, port, path);
+      open('DELETE', host, port, path);
 
   @override
-  Future<HttpClientRequest> deleteUrl(Uri url) => openUrl("delete", url);
+  Future<HttpClientRequest> deleteUrl(Uri url) => openUrl('DELETE', url);
 
   @override
   Future<HttpClientRequest> head(String host, int port, String path) =>
-      open("head", host, port, path);
+      open('HEAD', host, port, path);
 
   @override
-  Future<HttpClientRequest> headUrl(Uri url) => openUrl("head", url);
+  Future<HttpClientRequest> headUrl(Uri url) => openUrl('HEAD', url);
 
   @override
   Future<HttpClientRequest> patch(String host, int port, String path) =>
-      open("patch", host, port, path);
+      open('PATCH', host, port, path);
 
   @override
-  Future<HttpClientRequest> patchUrl(Uri url) => openUrl("patch", url);
+  Future<HttpClientRequest> patchUrl(Uri url) => openUrl('PATCH', url);
 
   @override
   set idleTimeout(Duration timeout) =>
@@ -722,13 +724,12 @@ class HttpSecurityPinningClient implements HttpClient {
   set badCertificateCallback(
       bool Function(X509Certificate cert, String host, int port)? callback) {
     _badCertificateCallback = callback;
+    _delegatePinnedHttpClient.badCertificateCallback = _pinningFailureCallback;
   }
 
   @override
   void close({bool force = false}) {
     _delegatePinnedHttpClient.close(force: force);
     _isClosed = true;
-    // Clear decoded pins cache to prevent memory leaks in long-lived applications
-    _HttpSecurityPinningService._decodedPinsCache.clear();
   }
 }
