@@ -417,7 +417,12 @@ class HttpSecurityPinningClient implements HttpClient {
   bool Function(X509Certificate cert, String host, int port)?
       _badCertificateCallback;
 
-  bool _pinningFailureCallback(X509Certificate cert, String host, int port) {
+  bool _pinningFailureCallback(
+    HttpClient sourceClient,
+    X509Certificate cert,
+    String host,
+    int port,
+  ) {
     final badCertificateCallback = _badCertificateCallback;
 
     // If user provided a custom callback, use its decision
@@ -428,11 +433,18 @@ class HttpSecurityPinningClient implements HttpClient {
       }
     }
 
+    final normalizedHost = host.toLowerCase();
+    final cachedClient = _delegatePinnedHttpClients[normalizedHost];
+    if (!identical(cachedClient, sourceClient)) {
+      debugPrint("$_tag: Ignoring stale pinning failure callback for $host.");
+      return false;
+    }
+
     debugPrint(
         "$_tag: Pinning failure callback for $host. Invalidating cache.");
-    final normalizedHost = host.toLowerCase();
     _HttpSecurityPinningService._removeCertificates(normalizedHost);
-    _delegatePinnedHttpClients.remove(normalizedHost)?.close(force: true);
+    _delegatePinnedHttpClients.remove(normalizedHost);
+    sourceClient.close(force: true);
     return false;
   }
 
@@ -458,7 +470,8 @@ class HttpSecurityPinningClient implements HttpClient {
           proxyCredential.realm, proxyCredential.credentials);
     }
 
-    client.badCertificateCallback = _pinningFailureCallback;
+    client.badCertificateCallback = (cert, callbackHost, port) =>
+        _pinningFailureCallback(client, cert, callbackHost, port);
   }
 
   Future<HttpClient> _createPinnedHttpClient(Uri url) async {
@@ -792,10 +805,11 @@ class HttpSecurityPinningClient implements HttpClient {
   set badCertificateCallback(
       bool Function(X509Certificate cert, String host, int port)? callback) {
     _badCertificateCallback = callback;
-    _stateHttpClient.badCertificateCallback = _pinningFailureCallback;
-    for (final client in _delegatePinnedHttpClients.values) {
-      client.badCertificateCallback = _pinningFailureCallback;
-    }
+    _stateHttpClient.badCertificateCallback = callback;
+    _delegatePinnedHttpClients.forEach((host, client) {
+      client.badCertificateCallback = (cert, callbackHost, port) =>
+          _pinningFailureCallback(client, cert, callbackHost, port);
+    });
   }
 
   @override
